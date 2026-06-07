@@ -7,6 +7,13 @@ A basic ASGI application demonstrating:
 - HTML response generation
 """
 
+import json
+
+import msgspec
+
+from app.schema import marshmallow_schema, msgspec_schema, pydantic_schema
+from app.users import Users
+
 
 async def application(scope, receive, send):
     """
@@ -43,6 +50,12 @@ async def application(scope, receive, send):
         await about_page(scope, receive, send)
     elif path == "/contact":
         await contact_page(scope, receive, send)
+    elif path == "/api/pydantic":
+        await api_pydantic_page(scope, receive, send)
+    elif path == "/api/marshmallow":
+        await api_marshmallow_page(scope, receive, send)
+    elif path == "/api/msgspec":
+        await api_msgspec_page(scope, receive, send)
     else:
         await not_found_page(scope, receive, send)
 
@@ -55,15 +68,40 @@ async def send_html(send, status, body):
         (b"content-length", str(len(response_bytes)).encode("utf-8")),
     ]
 
-    await send({
-        "type": "http.response.start",
-        "status": status,
-        "headers": headers,
-    })
-    await send({
-        "type": "http.response.body",
-        "body": response_bytes,
-    })
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": headers,
+        }
+    )
+    await send(
+        {
+            "type": "http.response.body",
+            "body": response_bytes,
+        }
+    )
+
+
+async def send_json(send, status, body):
+    """Emit a JSON response. ``body`` is already JSON-encoded bytes."""
+    headers = [
+        (b"content-type", b"application/json; charset=utf-8"),
+        (b"content-length", str(len(body)).encode("utf-8")),
+    ]
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": headers,
+        }
+    )
+    await send(
+        {
+            "type": "http.response.body",
+            "body": body,
+        }
+    )
 
 
 async def home_page(scope, receive, send):
@@ -210,3 +248,31 @@ async def not_found_page(scope, receive, send):
     """
 
     await send_html(send, 404, body)
+
+
+async def api_pydantic_page(scope, receive, send):
+    """API handler: validate users.json with pydantic and serialize back to JSON."""
+    payload = json.loads(Users.get_users())
+    response = pydantic_schema.UsersResponse.model_validate(payload)
+    body = response.model_dump_json().encode("utf-8")
+
+    await send_json(send, 200, body)
+
+
+async def api_marshmallow_page(scope, receive, send):
+    """API handler: validate users.json with marshmallow and serialize back to JSON."""
+    schema = marshmallow_schema.UsersResponse()
+    payload = json.loads(Users.get_users())
+    data = schema.load(payload)
+    body = json.dumps(schema.dump(data)).encode("utf-8")
+
+    await send_json(send, 200, body)
+
+
+async def api_msgspec_page(scope, receive, send):
+    """API handler: validate users.json with msgspec and serialize back to JSON."""
+    raw = Users.get_users()
+    response = msgspec.json.decode(raw, type=msgspec_schema.UsersResponse)
+    body = msgspec.json.encode(response)
+
+    await send_json(send, 200, body)
