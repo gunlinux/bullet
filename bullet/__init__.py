@@ -1,17 +1,9 @@
-from typing import Awaitable, ParamSpec, TypeVar, Callable, Any
+from typing import Awaitable, Callable, Any
 import dataclasses
 
-import io
 import re
-from app.asgi import send_json
 
 param_reg = re.compile(r"<([\w]+)>")
-
-
-P = ParamSpec("P")
-T = TypeVar("T")
-
-# _F = TypeVar("_F", bound=Awaitable[Any])
 
 
 def validate_handler(path: str, handler: Callable[..., Awaitable[bytes]]) -> None:
@@ -21,6 +13,23 @@ def validate_handler(path: str, handler: Callable[..., Awaitable[bytes]]) -> Non
             raise ValueError
         if handler.__defaults__ and param in handler.__defaults__:
             raise ValueError
+
+
+def _compile_route(pattern: str) -> re.Pattern:
+    """Convert a Flask-style route pattern like ``/age/<age>`` into a compiled regex."""
+    regex = re.sub(r"<(\w+)>", r"(?P<\1>[^/]+)", pattern)
+    return re.compile(f"^{regex}$")
+
+
+def _convert_param(value: str, annotation: type) -> Any:
+    """Convert a string param to the type specified in the handler annotation."""
+    if annotation is int:
+        return int(value)
+    if annotation is float:
+        return float(value)
+    if annotation is str:
+        return value
+    return value
 
 
 @dataclasses.dataclass
@@ -49,26 +58,31 @@ class Handler:
     def __init__(self, route: str, handler: Callable[..., Awaitable[bytes]]):
         self.handler = handler
         self.path = route
-        # default values
-        print(type(handler))
-        print(handler.__annotations__)
-        print(handler.__defaults__)  # это тапл
+        self.pattern = _compile_route(route)
+        self.annotations = handler.__annotations__
 
-    async def execute(self, request: Request) -> bytes:
-        return await self.handler(request, age=16)
+    def match(self, path: str) -> dict[str, str] | None:
+        """Return extracted path parameters if ``path`` matches this route, or None."""
+        m = self.pattern.match(path)
+        if m is None:
+            return None
+        return m.groupdict()
+
+    async def execute(self, request: Request, params: dict[str, str]) -> bytes:
+        kwargs: dict[str, Any] = {}
+        for name, value in params.items():
+            annotation = self.annotations.get(name, str)
+            kwargs[name] = _convert_param(value, annotation)
+        return await self.handler(request, **kwargs)
 
 
 class BulletApp:
     def __init__(self):
-        self.handlers: dict[str, Handler] = {}
-
-    def dispatch(self, handler):
-        print(handler.__annotations__)
+        self.handlers: list[Handler] = []
 
     def add_handler(self, route: str, handler: Callable[..., Awaitable[Any]]) -> None:
         validate_handler(route, handler=handler)
-        print(f'add hander to route {route}')
-        self.handlers[route] = Handler(route=route, handler=handler)
+        self.handlers.append(Handler(route=route, handler=handler))
 
     async def lifespan(self, scope, receive, send):
         while True:
@@ -82,9 +96,8 @@ class BulletApp:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "lifespan":
             await self.lifespan(scope, receive, send)
+            return
 
-        print(f"scope: {scope}")
-        # rust impovement part
         more_body = True
         body = []
         while more_body:
@@ -93,18 +106,16 @@ class BulletApp:
             body.append(event["body"])
         body = b"".join(body)
 
-        path = scope['path'] + '/<age>'
-        path = '/age/<age>'
-        # TODO IMPEMENT NORMA ROUTE MATCHING!
-        print(path)
-        '%s/agents/%s/pages/%s/'
-        if handler := self.handlers.get(path):
-            print(f"find handler {handler} for {scope['path']}")
-            request = Request(scope, body)
-            await send_json(send, 200, await handler.execute(request))
-            return
+        path = scope["path"]
+        request = Request(scope, body)
 
-        await send_json(send, 200, b'{"name": "loki", "age": 37}')
+        for handler in self.handlers:
+            params = handler.match(path)
+            if params is not None:
+                await self.send_json(send, 200, await handler.execute(request, params))
+                return
+
+        await self.send_json(send, 200, b'{"name": "loki", "age": 37}')
 
     async def send_json(self, send, status, body):
         """Emit a JSON response. ``body`` is already JSON-encoded bytes."""
@@ -119,4 +130,4 @@ class BulletApp:
                 "headers": headers,
             }
         )
-        await send({"type": "http.response.body", "body": io.StringIO(body)})
+        await send({"type": "http.response.body", "body": body})
