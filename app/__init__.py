@@ -1,14 +1,25 @@
-from app.wsgi import application as wsgi_app
-from app.asgi import application as asgi_app
-from app.rsgi import application as rsgi_app
+from bullet import BulletApp, Request
+import json
 
+base_d = {"name": "loki", "age": 37}
 
-def create_app_wsgi():
-    return wsgi_app
 
 def create_app_asgi():
-    return asgi_app
+    app = BulletApp()
 
-def create_app_rsgi():
-    return rsgi_app
+    async def index_page(request: Request) -> bytes:
+        print(request)
+        print("index_page here")
+        body = json.dumps(base_d).encode("utf-8")
+        return body
 
+    async def param_page(
+        request: Request, age: int,
+    ) -> bytes:
+        temp = {"age": age}
+        return json.dumps(temp).encode("utf-8")
+
+    app.add_handler("/", index_page)
+    app.add_handler("/age/<age>", param_page)
+
+    return app
