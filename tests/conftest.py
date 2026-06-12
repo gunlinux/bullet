@@ -2,10 +2,15 @@ import functools
 from typing import Generator
 
 import pytest
+from msgspec import Struct
 
-from bullet import BulletApp, Request
+from bullet import BulletApp, Path, Request
 from bullet.testclient import TestClient
 from tests.types import TestClientFactory
+
+
+class AgePath(Struct):
+    age: int
 
 
 @pytest.fixture
@@ -15,8 +20,8 @@ def app() -> BulletApp:
     async def index_page(request: Request) -> dict:
         return {"name": "loki", "age": 37}
 
-    async def param_page(request: Request, age: int) -> dict:
-        return {"age": age}
+    async def param_page(request: Request, path: Path[AgePath]) -> dict:
+        return {"age": path.age}
 
     app.add_handler("/", index_page)
     app.add_handler("/age/<age>", param_page)
@@ -25,8 +30,6 @@ def app() -> BulletApp:
 
 @pytest.fixture
 def test_client_factory() -> TestClientFactory:
-    # anyio_backend_name defined by:
-    # https://anyio.readthedocs.io/en/stable/testing.html#specifying-the-backends-to-run-on
     return functools.partial(TestClient)
 
 

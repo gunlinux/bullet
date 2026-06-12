@@ -1,13 +1,24 @@
 import inspect
 import re
-from typing import Any, Awaitable, Callable
+from typing import Annotated, Any, Awaitable, Callable, get_args, get_origin
 
 import msgspec
 
 from bullet._http import Request
-from bullet._types import BadRequest
+from bullet.params import _BodyMarker, _PathMarker, _QueryMarker
 
 _param_re = re.compile(r"<([\w]+)>")
+
+
+def _parse_marker(annotation: Any) -> tuple[type, type] | None:
+    if get_origin(annotation) is not Annotated:
+        return None
+    args = get_args(annotation)
+    inner = args[0]
+    for meta in args[1:]:
+        if isinstance(meta, (_QueryMarker, _BodyMarker, _PathMarker)):
+            return type(meta), inner
+    return None
 
 
 def validate_handler(
@@ -18,14 +29,26 @@ def validate_handler(
     for name, p in sig.parameters.items():
         if name == "request":
             continue
-        if name not in params:
+        marker = _parse_marker(p.annotation)
+        if marker is None:
+            if name in params:
+                params.discard(name)
             continue
-        if p.default is not inspect.Parameter.empty:
-            raise ValueError(f"route param '{name}' must not have a default value")
-        params.discard(name)
+        source, typ = marker
+        if source is _PathMarker:
+            if not (isinstance(typ, type) and issubclass(typ, msgspec.Struct)):
+                raise ValueError(f"Path[...] requires a msgspec.Struct, got {typ!r}")
+            for field in msgspec.structs.fields(typ):
+                if field.name in params:
+                    params.discard(field.name)
+                elif field.required:
+                    raise ValueError(
+                        f"Path struct field '{field.name}' is not a route param"
+                    )
     if params:
         raise ValueError(
-            f"handler missing annotations for route params: {', '.join(sorted(params))}"
+            f"route params not covered by any Path[...] struct: "
+            f"{', '.join(sorted(params))}"
         )
 
 
@@ -41,20 +64,6 @@ def _compile_route(pattern: str) -> re.Pattern[str]:
     return re.compile(f"^{escaped}$")
 
 
-def _convert_param(value: str, annotation: type) -> Any:
-    if annotation is int:
-        try:
-            return int(value)
-        except ValueError:
-            raise BadRequest(f"invalid integer: {value!r}")
-    if annotation is float:
-        try:
-            return float(value)
-        except ValueError:
-            raise BadRequest(f"invalid float: {value!r}")
-    return value
-
-
 class Handler:
     def __init__(
         self, route: str, handler: Callable[..., Awaitable[str | dict | msgspec.Struct]]
@@ -62,7 +71,17 @@ class Handler:
         self.handler = handler
         self.path = route
         self.pattern = _compile_route(route)
-        self.annotations: dict[str, Any] = handler.__annotations__
+        self._extractors: list[tuple[str, type, type]] = []
+        self._bare_path_params: list[tuple[str, type]] = []
+        route_params = set(_param_re.findall(route))
+        for name, p in inspect.signature(handler).parameters.items():
+            if name == "request":
+                continue
+            marker = _parse_marker(p.annotation)
+            if marker is not None:
+                self._extractors.append((name, *marker))
+            elif name in route_params:
+                self._bare_path_params.append((name, p.annotation))
 
     def match(self, path: str) -> dict[str, str] | None:
         m = self.pattern.match(path)
@@ -75,13 +94,20 @@ class Handler:
         request: Request,
         params: dict[str, str] | None = None,
     ) -> tuple[int, str | dict | msgspec.Struct]:
-        if not params:
-            return 200, await self.handler(request)
         kwargs: dict[str, Any] = {}
         try:
-            for name, value in params.items():
-                annotation = self.annotations.get(name, str)
-                kwargs[name] = _convert_param(value, annotation)
-        except BadRequest as exc:
+            for name, source, typ in self._extractors:
+                if source is _QueryMarker:
+                    kwargs[name] = msgspec.convert(
+                        request.query, type=typ, strict=False
+                    )
+                elif source is _BodyMarker:
+                    kwargs[name] = msgspec.json.decode(request.body, type=typ)
+                else:  # _PathMarker
+                    kwargs[name] = msgspec.convert(params or {}, type=typ, strict=False)
+            for name, typ in self._bare_path_params:
+                raw = (params or {}).get(name)
+                kwargs[name] = msgspec.convert(raw, type=typ, strict=False)
+        except msgspec.DecodeError as exc:  # ValidationError subclasses DecodeError
             return 400, {"error": str(exc)}
         return 200, await self.handler(request, **kwargs)
