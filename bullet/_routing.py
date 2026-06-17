@@ -16,7 +16,7 @@ from bullet._http import Request
 from bullet.params import _BodyMarker, _PathMarker, _QueryMarker
 
 if TYPE_CHECKING:
-    from bullet import Response
+    from bullet._types import HandlerReturn
 
 _param_re = re.compile(r"<([\w]+)>")
 
@@ -32,7 +32,9 @@ def _parse_marker(annotation: Any) -> tuple[type, type] | None:
     return None
 
 
-def validate_handler(path: str, handler: Callable[..., Awaitable["Response"]]) -> None:
+def validate_handler(
+    path: str, handler: Callable[..., Awaitable["HandlerReturn"]]
+) -> None:
     params = set(_param_re.findall(path))
     sig = inspect.signature(handler)
     for name, p in sig.parameters.items():
@@ -74,9 +76,15 @@ def _compile_route(pattern: str) -> re.Pattern[str]:
 
 
 class Handler:
-    def __init__(self, route: str, handler: Callable[..., Awaitable["Response"]]):
+    def __init__(
+        self,
+        route: str,
+        handler: Callable[..., Awaitable["HandlerReturn"]],
+        methods: frozenset[str] | None = None,
+    ):
         self.handler = handler
         self.path = route
+        self.methods = methods
         self.pattern = _compile_route(route)
         self._extractors: list[tuple[str, type, type]] = []
         self._bare_path_params: list[tuple[str, type]] = []
@@ -90,6 +98,9 @@ class Handler:
             elif name in route_params:
                 self._bare_path_params.append((name, p.annotation))
 
+    def allows(self, method: str) -> bool:
+        return self.methods is None or method in self.methods
+
     def match(self, path: str) -> dict[str, str] | None:
         m = self.pattern.match(path)
         if m is None:
@@ -100,7 +111,7 @@ class Handler:
         self,
         request: Request,
         params: dict[str, str] | None = None,
-    ) -> "Response":
+    ) -> "HandlerReturn":
         kwargs: dict[str, Any] = {}
         try:
             for name, source, typ in self._extractors:
