@@ -16,7 +16,7 @@ from bullet._http import Request
 from bullet.params import _BodyMarker, _PathMarker, _QueryMarker
 
 if TYPE_CHECKING:
-    from bullet import Response
+    from bullet._types import HandlerReturn
 
 _param_re = re.compile(r"<([\w]+)>")
 
@@ -32,7 +32,9 @@ def _parse_marker(annotation: Any) -> tuple[type, type] | None:
     return None
 
 
-def validate_handler(path: str, handler: Callable[..., Awaitable["Response"]]) -> None:
+def validate_handler(
+    path: str, handler: Callable[..., Awaitable["HandlerReturn"]]
+) -> None:
     params = set(_param_re.findall(path))
     sig = inspect.signature(handler)
     for name, p in sig.parameters.items():
@@ -77,7 +79,7 @@ class Handler:
     def __init__(
         self,
         route: str,
-        handler: Callable[..., Awaitable["Response"]],
+        handler: Callable[..., Awaitable["HandlerReturn"]],
         methods: frozenset[str] | None = None,
     ):
         self.handler = handler
@@ -109,7 +111,7 @@ class Handler:
         self,
         request: Request,
         params: dict[str, str] | None = None,
-    ) -> "Response":
+    ) -> "HandlerReturn":
         kwargs: dict[str, Any] = {}
         try:
             for name, source, typ in self._extractors:

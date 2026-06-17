@@ -18,7 +18,7 @@ from bullet._routing import Handler, validate_handler
 from bullet._types import HandlerFunc
 
 if TYPE_CHECKING:
-    from bullet import Response
+    from bullet._types import HandlerReturn
 
 _BODYLESS = frozenset({"GET", "HEAD", "OPTIONS", "DELETE"})
 _CT_JSON = (b"content-type", b"application/json; charset=utf-8")
@@ -45,7 +45,7 @@ class BulletApp:
         self._static: dict[str, list[Handler]] = {}
         self._dynamic: list[Handler] = []
         self.exceptions_handlers: dict[
-            type[Exception] | int, Callable[..., Awaitable["Response"]]
+            type[Exception] | int, Callable[..., Awaitable["HandlerReturn"]]
         ] = {}
         self._lifespan: Optional[Lifespan] = (
             _as_lifespan(lifespan) if lifespan is not None else None
@@ -55,14 +55,14 @@ class BulletApp:
     def add_exception_handler(
         self,
         exc_class_or_status_code: type[Exception] | int,
-        handler: Callable[..., Awaitable["Response"]],
+        handler: Callable[..., Awaitable["HandlerReturn"]],
     ):
         self.exceptions_handlers[exc_class_or_status_code] = handler
 
     def add_handler(
         self,
         route: str,
-        handler: Callable[..., Awaitable["Response"]],
+        handler: Callable[..., Awaitable["HandlerReturn"]],
         methods: Iterable[str] | None = None,
     ) -> None:
         validate_handler(route, handler=handler)
@@ -154,26 +154,56 @@ class BulletApp:
         method = scope.get("method", "GET").upper()
         path = scope["path"]
         request = Request(scope, body, app=self)
-        matched_wrong_method = False
+        path_matched = False
+
+        for handler in self._static.get(path, ()):
+            path_matched = True
+            if handler.allows(method):
+                await self._dispatch(send, request, handler, None)
+                return
 
         for handler in self._dynamic:
             params = handler.match(path)
-            if params is not None and handler.allows(method):
-                try:
-                    status, response_body = await handler.execute(request, params)
-                except Exception as exc:
-                    if exc_handler := self.exceptions_handlers.get(type(exc), None):
-                        status, response_body = await exc_handler(request, exc)
-                        await _send_json(send, status, response_body)
-                    return
-                else:
-                    await _send_json(send, status, response_body)
-                matched_wrong_method = True
+            if params is None:
+                continue
+            path_matched = True
+            if handler.allows(method):
+                await self._dispatch(send, request, handler, params)
+                return
 
-        if matched_wrong_method:
+        if path_matched:
             await _send_json(send, 405, {"error": "Method not allowed"})
         else:
             await _send_json(send, 404, {"error": "Not found"})
+
+    async def _dispatch(
+        self,
+        send,
+        request: Request,
+        handler: Handler,
+        params: dict[str, str] | None,
+    ) -> None:
+        try:
+            result = await handler.execute(request, params)
+        except Exception as exc:
+            exc_handler = self.exceptions_handlers.get(type(exc), None)
+            if exc_handler is not None:
+                result = await exc_handler(request, exc)
+            else:
+                return
+        status, response_body = _normalize_response(result)
+        await _send_json(send, status, response_body)
+
+
+def _normalize_response(result: Any) -> tuple[int, Any]:
+    """Normalize a handler return into a ``(status, body)`` pair.
+
+    Handlers may return an explicit ``(status, body)`` tuple or a bare body
+    (``dict``, ``str``, ``msgspec.Struct``, ...) which defaults to status 200.
+    """
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], int):
+        return result
+    return 200, result
 
 
 async def _send_json(send, status: int, body: str | dict | msgspec.Struct) -> None:
