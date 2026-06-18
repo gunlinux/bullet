@@ -312,6 +312,47 @@ async def version(request: Request) -> dict:
 
 ---
 
+## Running under Granian (RSGI)
+
+Besides the ASGI interface, the same `GunbulletApp` runs directly on Granian's
+[RSGI](https://github.com/emmett-framework/granian) interface — Granian's Rust
+core reads the socket and assembles the whole request body itself, so there is
+no per-chunk `receive()` loop and the response goes out in a single
+`response_bytes` call.
+
+```bash
+uv run granian --interface rsgi main:app_asgi --workers 1 --no-ws
+make dev-rsgi                        # same thing
+make bench-servers                   # load-compare uvicorn/ASGI vs granian/ASGI vs granian/RSGI (needs wrk)
+```
+
+The same app object is served by both interfaces: ASGI calls `__call__`, RSGI
+calls `__rsgi__`. Handlers, routing, params, and `request.*` behave identically.
+
+### Known caveats / differences vs. ASGI
+
+These are RSGI-specific behaviors to be aware of:
+
+- **`request.state` is shared, not per-request.** RSGI has no per-request scope
+  state, so the dict yielded by the lifespan is surfaced on `request.state`
+  **as the same object** for every request in the worker. Under ASGI each
+  request gets a shallow copy, so mutating `request.state` in a handler is
+  isolated; under RSGI a write leaks to all other requests. Treat
+  `request.state` as **read-only** under RSGI, or use `request.app.state` for
+  intentionally app-wide data.
+- **HTTP only.** WebSocket (`ws`) scopes are ignored — Granian is started with
+  `--no-ws` above. Non-HTTP scopes get no response.
+- **Unhandled handler exceptions return 500.** When a handler raises and no
+  exception handler is registered, the ASGI path leaves the server's own
+  fallback to answer; under RSGI the app emits an explicit `500
+  {"error": "Internal server error"}` because Granian has no such fallback and
+  would otherwise leave the connection hanging.
+- **Lifespan runs via sync hooks.** RSGI has no ASGI-style lifespan protocol;
+  Granian calls `__rsgi_init__` / `__rsgi_del__` with the event loop before and
+  after serving, and the framework drives the async lifespan context manager on
+  that loop. A failing startup propagates and aborts the worker (matching ASGI's
+  fail-fast), and shutdown is skipped if startup never completed.
+
 ## Testing
 
 `gunbullet.testclient.TestClient` is a **synchronous** client (built on `httpx` +

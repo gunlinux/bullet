@@ -3,6 +3,15 @@ dev: ## Install dev dependencies
 	uv sync --dev
 	uv run uvicorn main:app_asgi
 
+.PHONY: dev-rsgi
+dev-rsgi: ## Run the app under Granian's RSGI interface (Rust HTTP core)
+	uv run granian --interface rsgi main:app_asgi --workers 1 --no-ws
+
+.PHONY: dev-asgi
+dev-asgi: ## Run the app under Granian's RSGI interface (Rust HTTP core)
+	uv run granian --interface asgi main:app_asgi --workers 1 --no-ws
+
+
 .PHONY: build
 build: ## Compile the Rust router and install it editable into the venv
 	uv run maturin develop --release
@@ -34,5 +43,9 @@ test: ## Run tests with coverage
 .PHONY: bench
 bench: ## Run in-process performance microbenchmarks
 	uv run pytest benchmarks/ --benchmark-columns=min,mean,median,ops
+
+.PHONY: bench-servers
+bench-servers: ## Load-compare uvicorn/ASGI vs granian/ASGI vs granian/RSGI (needs wrk)
+	sh bench_servers.sh
 
 

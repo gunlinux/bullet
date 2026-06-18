@@ -212,6 +212,48 @@ async def _once(
     return sent
 
 
+async def _once_chunked(
+    app: GunbulletApp, scope: dict[str, Any], chunks: list[bytes]
+) -> list[dict[str, Any]]:
+    """Drive the request with a body split across several ``receive()`` events.
+
+    The single-chunk ``_once`` never iterates the body loop more than once, so
+    it hides the cost of accumulating the body across events. This feeds the
+    body one chunk per ``receive()`` (``more_body=True`` until the last) to
+    exercise the multi-chunk path.
+    """
+    sent: list[dict[str, Any]] = []
+    it = iter(chunks)
+
+    async def receive() -> dict[str, Any]:
+        try:
+            chunk = next(it)
+        except StopIteration:
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.request", "body": chunk, "more_body": True}
+
+    async def send(msg: dict[str, Any]) -> None:
+        sent.append(msg)
+
+    await app(scope, receive, send)
+    return sent
+
+
+def _split(data: bytes, n: int) -> list[bytes]:
+    """Split ``data`` into exactly ``n`` chunks (the last absorbs the remainder).
+
+    The first ``n - 1`` chunks are ``len(data) // n`` bytes each and the final
+    chunk takes whatever is left, so the result always has ``n`` elements and
+    matches the ``n_chunks`` the benchmark parametrizes over.
+    """
+    if n <= 1:
+        return [data]
+    size = max(1, len(data) // n)
+    return [data[i * size : (i + 1) * size] for i in range(n - 1)] + [
+        data[(n - 1) * size :]
+    ]
+
+
 @pytest.fixture(scope="module")
 def runner() -> Any:
     with asyncio.Runner() as r:
@@ -297,6 +339,22 @@ def test_post_large_body(benchmark: Any, app: GunbulletApp, runner: Any) -> None
     # Worst round-trip: decode a big body into structs, then re-encode it.
     scope = _scope("/users/bulk", method="POST", headers=_JSON_HEADERS)
     sent = benchmark(lambda: runner.run(_once(app, scope, _USER_LIST_BODY)))
+    assert sent[0]["status"] == 200
+
+
+# --- multi-chunk bodies (isolate the receive() accumulation loop) -------------
+# The big body is split across many ``receive()`` events to surface the cost of
+# building up ``body`` chunk by chunk. 1 chunk is the baseline (single iteration);
+# 8 and 64 chunks reveal how accumulation scales with chunk count.
+
+
+@pytest.mark.parametrize("n_chunks", [1, 8, 64])
+def test_post_chunked_body(
+    benchmark: Any, app: GunbulletApp, runner: Any, n_chunks: int
+) -> None:
+    scope = _scope("/users/bulk", method="POST", headers=_JSON_HEADERS)
+    chunks = _split(_USER_LIST_BODY, n_chunks)
+    sent = benchmark(lambda: runner.run(_once_chunked(app, scope, chunks)))
     assert sent[0]["status"] == 200
 
 

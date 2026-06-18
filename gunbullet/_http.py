@@ -43,12 +43,24 @@ class State:
 
 
 class Headers:
-    """Case-insensitive string header mapping."""
+    """Case-insensitive string header mapping.
+
+    Accepts the raw header pairs from either protocol: ASGI delivers
+    ``(bytes, bytes)`` tuples, RSGI (Granian) delivers ``(str, str)`` -- each
+    item is normalized to ``str`` so the rest of the request API is identical.
+    """
 
     __slots__ = ("_store",)
 
-    def __init__(self, raw: list[tuple[bytes, bytes]]):
-        self._store: dict[str, str] = {k.lower().decode(): v.decode() for k, v in raw}
+    def __init__(self, raw: "list[tuple[bytes, bytes]] | list[tuple[str, str]]"):
+        store: dict[str, str] = {}
+        for k, v in raw:
+            if isinstance(k, bytes):
+                k = k.decode()
+            if isinstance(v, bytes):
+                v = v.decode()
+            store[k.lower()] = v
+        self._store = store
 
     def get(self, name: str, default: str | None = None) -> str | None:
         return self._store.get(name.lower(), default)
@@ -86,8 +98,13 @@ class Request:
         body: bytes = b"",
         *,
         app: "GunbulletApp",
+        method: str | None = None,
     ):
-        self.method: str = scope.get("method", "").upper()
+        # ``method`` lets the caller pass an already-normalized value (the app
+        # computes it once per request); fall back to the scope otherwise.
+        self.method: str = (
+            method if method is not None else scope.get("method", "").upper()
+        )
         self.path: str = scope.get("path", "")
         self.body: bytes = body
         self.app: "GunbulletApp" = app
@@ -98,6 +115,38 @@ class Request:
         self._headers: Headers | None = None
         self._query: dict[str, str] | None = None
         self._cookies: dict[str, str] | None = None
+
+    @classmethod
+    def from_rsgi(
+        cls,
+        scope: Any,
+        body: bytes = b"",
+        *,
+        app: "GunbulletApp",
+        state: dict[str, Any] | None = None,
+    ) -> "Request":
+        """Build a Request from a Granian RSGI scope.
+
+        The RSGI ``scope`` is an attribute object (not a dict) and its
+        ``query_string`` is already ``str``; headers are an ``RSGIHeaders``
+        mapping whose ``.items()`` yields ``(str, str)``. We stash the raw
+        pairs and decode lazily, exactly like the ASGI path.
+        """
+        self = cls.__new__(cls)
+        self.method = scope.method.upper()
+        self.path = scope.path
+        self.body = body
+        self.app = app
+        self.state = state if state is not None else {}
+        # Lazily materialized by the `headers` property; `Headers` accepts the
+        # str pairs RSGI hands us, so no eager encode/decode round-trip.
+        self._raw_headers = scope.headers.items()
+        qs = scope.query_string or ""
+        self._query_string = qs.encode() if isinstance(qs, str) else qs
+        self._headers = None
+        self._query = None
+        self._cookies = None
+        return self
 
     @property
     def headers(self) -> Headers:
